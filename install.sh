@@ -112,7 +112,7 @@ if [[ "$CREATE_USER" =~ ^[Yy]$ ]]; then
         passwd -l root  # Блокируем пароль
         sed -i 's/^PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
         sed -i 's/^#PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
-        systemctl restart sshd
+        systemctl restart ssh
         log "Root заблокирован по паролю. Вход только по SSH-ключам."
         warn "Убедитесь, что у '$NEW_USER' есть SSH-ключ, иначе потеряете доступ!"
     fi
