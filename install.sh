@@ -1,10 +1,10 @@
 #!/bin/bash
-
 # Jellyfin + Nginx + Let's Encrypt (Certbot) installer
 # Поддерживаемые ОС: Ubuntu 20.04/22.04/24.04, Debian 11/12
 # Требуются права root (sudo)
 # Один запуск — установка Jellyfin, Nginx, получение/обновление SSL через Let's Encrypt
-# Пользователь вводит: домен, email для Let's Encrypt
+# + Создание нового пользователя с sudo + Блокировка root по паролю (только SSH-ключи)
+# Пользователь вводит: домен, email, имя нового пользователя, пароль (скрытый ввод)
 
 set -e
 
@@ -57,6 +57,66 @@ fi
 
 read -p "Открыть порты 80/443 в ufw? (y/n, по умолчанию y): " OPEN_UFW
 OPEN_UFW=${OPEN_UFW:-y}
+
+# === ВВОД ДЛЯ НОВОГО ПОЛЬЗОВАТЕЛЯ ===
+read -p "Создать нового пользователя с sudo? (y/n, по умолчанию y): " CREATE_USER
+CREATE_USER=${CREATE_USER:-y}
+
+if [[ "$CREATE_USER" =~ ^[Yy]$ ]]; then
+    read -p "Имя нового пользователя (по умолчанию 'admin'): " NEW_USER
+    NEW_USER=${NEW_USER:-admin}
+
+    if id "$NEW_USER" &>/dev/null; then
+        warn "Пользователь '$NEW_USER' уже существует. Пропускаем создание."
+    else
+        # Скрытый ввод пароля
+        read -s -p "Пароль для '$NEW_USER': " USER_PASS
+        echo
+        read -s -p "Повторите пароль: " USER_PASS2
+        echo
+        if [[ "$USER_PASS" != "$USER_PASS2" ]]; then
+            error "Пароли не совпадают!"
+            exit 1
+        fi
+        if [[ -z "$USER_PASS" ]]; then
+            error "Пароль не может быть пустым!"
+            exit 1
+        fi
+
+        log "Создание пользователя '$NEW_USER'..."
+        useradd -m -s /bin/bash "$NEW_USER"
+        echo "$NEW_USER:$USER_PASS" | chpasswd
+
+        # Добавление в sudo
+        usermod -aG sudo "$NEW_USER"
+
+        # Копирование SSH-ключей root в нового пользователя (если есть)
+        if [[ -d /root/.ssh ]] && [[ -f /root/.ssh/authorized_keys ]]; then
+            log "Копирование SSH-ключей root → $NEW_USER"
+            mkdir -p /home/$NEW_USER/.ssh
+            cp /root/.ssh/authorized_keys /home/$NEW_USER/.ssh/
+            chown -R $NEW_USER:$NEW_USER /home/$NEW_USER/.ssh
+            chmod 700 /home/$NEW_USER/.ssh
+            chmod 600 /home/$NEW_USER/.ssh/authorized_keys
+        fi
+
+        log "Пользователь '$NEW_USER' создан и добавлен в sudo."
+    fi
+
+    # === БЛОКИРОВКА ROOT ПО ПАРОЛЮ ===
+    read -p "Заблокировать вход root по паролю (оставить только SSH-ключи)? (y/n, по умолчанию y): " LOCK_ROOT
+    LOCK_ROOT=${LOCK_ROOT:-y}
+
+    if [[ "$LOCK_ROOT" =~ ^[Yy]$ ]]; then
+        log "Блокировка root по паролю..."
+        passwd -l root  # Блокируем пароль
+        sed -i 's/^PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
+        sed -i 's/^#PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
+        systemctl restart sshd
+        log "Root заблокирован по паролю. Вход только по SSH-ключам."
+        warn "Убедитесь, что у '$NEW_USER' есть SSH-ключ, иначе потеряете доступ!"
+    fi
+fi
 
 # === УСТАНОВКА ЗАВИСИМОСТЕЙ ===
 log "Обновление пакетов..."
@@ -199,7 +259,16 @@ echo
 echo "   Jellyfin доступен по адресу: https://$DOMAIN"
 echo "   Админ-панель: https://$DOMAIN (первый запуск — создание пользователя)"
 echo
+if [[ "$CREATE_USER" =~ ^[Yy]$ ]] && id "$NEW_USER" &>/dev/null; then
+    echo "   Новый пользователь: $NEW_USER"
+    echo "   Вход: ssh $NEW_USER@ваш_IP"
+    echo "   Используйте sudo без пароля (если настроено)."
+fi
+echo
 echo "   Сертификат будет обновляться автоматически (cron)."
 echo "   Проверьте статус: systemctl status jellyfin nginx"
 echo
 warn "Убедитесь, что A-запись $DOMAIN указывает на этот сервер!"
+if [[ "$LOCK_ROOT" =~ ^[Yy]$ ]]; then
+    warn "ROOT ЗАБЛОКИРОВАН ПО ПАРОЛЮ! Используйте SSH-ключи через '$NEW_USER'."
+fi
